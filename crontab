@@ -1,0 +1,4 @@
+0 9 * * * docker run --rm autopunch docker run autopunch punch-in --check-holiday
+0 13 * * * docker run --rm autopunch docker run autopunch punch-out --check-holiday
+0 14 * * * docker run --rm autopunch docker run autopunch punch-in --check-holiday
+0 18 * * * docker run --rm autopunch docker run autopunch punch-out --check-holiday

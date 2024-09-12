@@ -4,10 +4,10 @@ Así verás que no se me olvida fichar
 
 Fichar:
 ```
-docker run autopunch punch-in --check-holiday
+docker run autopunch in
 ```
 
 Desfichar:
 ```
-docker run autopunch punch-out --check-holiday
+docker run autopunch out
 ```

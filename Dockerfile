@@ -16,7 +16,7 @@ RUN GECKODRIVER_VERSION=v0.35.0 && \
     rm /tmp/geckodriver.tar.gz && \
     chmod +x /usr/local/bin/geckodriver
 
-RUN pip install selenium==4.24.0 click==8.1.7 workalendar==17.0.0
+RUN pip install selenium==4.24.0 click==8.1.7
 ADD autopunch.py autopunch.py
 
 ENTRYPOINT ["python", "autopunch.py"]

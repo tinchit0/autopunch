@@ -1,9 +1,10 @@
+import os
 import re
 import time
 from contextlib import contextmanager
 from datetime import date
 
-import click
+import typer
 from google.cloud import scheduler_v1
 from google.protobuf import field_mask_pb2
 from selenium import webdriver
@@ -12,6 +13,13 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options
 
 INTERSLEEP_TIME = 2
+TIMENET_USERNAME = os.environ.get("AUTOPUNCH_TIMENET_USER", "_NO_USER_")
+TIMENET_PASSWORD = os.environ.get("AUTOPUNCH_TIMENET_PASSWORD", "_NO_PASSWORD_")
+GCP_PROJECT_ID = os.environ.get("AUTOPUNCH_GCP_PROJECT_ID", "_NO_GCP_PROJECT_ID_")
+GCP_JOB_NAME = os.environ.get("AUTOPUNCH_GCP_JOB_NAME", "_NO_GCP_JOB_NAME_")
+GCP_LOCATION = os.environ.get("AUTOPUNCH_GCP_LOCATION", "_NO_GCP_LOCATION_")
+
+app = typer.Typer()
 
 
 def sleep():
@@ -33,8 +41,10 @@ def enter_timenet(headless=True):
             "https://timenet.gpisoftware.com/wcp/login/f94ff22a-8361-4033-80ef-215feda7babe"
         )
         sleep()
-        pin_input = driver.find_element(by=By.ID, value="gpi-input-0")
-        pin_input.send_keys("xxxx")
+        user_input = driver.find_element(by=By.ID, value="user")
+        user_input.send_keys(TIMENET_USERNAME)
+        pass_input = driver.find_element(by=By.CSS_SELECTOR, value="#password input")
+        pass_input.send_keys(TIMENET_PASSWORD)
         submit_button = driver.find_element(
             by=By.CSS_SELECTOR, value="button[aria-label=Entrar]"
         )
@@ -70,14 +80,9 @@ def extract_working_hours(driver, date=date.today()):
     return working_hours
 
 
-@click.group()
-def cli():
-    pass
-
-
-@cli.command()
-@click.option("--dev", is_flag=True, default=False, help="Dev mode")
-def punch(dev):
+@app.command()
+def punch(dev: bool = False):
+    "Enter timenet and punch in or out depending on the current state"
     with enter_timenet(headless=not dev) as driver:
         label = "Sortida" if am_i_working(driver) else "Entrada"
         driver.find_element(
@@ -86,20 +91,17 @@ def punch(dev):
         sleep()
 
 
-@cli.command()
-@click.option("--dev", is_flag=True, default=False, help="Dev mode")
-def program(dev):
+@app.command()
+def program(dev: bool = False):
+    "Program executions of autopunch in GCP"
     with enter_timenet(headless=not dev) as driver:
         today = date.today()
         total_expected_hours = extract_working_hours(driver, date=today)
         if total_expected_hours == 0:
             return
         client = scheduler_v1.CloudSchedulerClient()
-        project_id = "endless-anagram-324913"
-        job_name = "autopunch-scheduler-trigger"
-        location = "us-central1"
         job = client.get_job(
-            name=f"projects/{project_id}/locations/{location}/jobs/{job_name}"
+            name=f"projects/{GCP_PROJECT_ID}/locations/{GCP_LOCATION}/jobs/{GCP_JOB_NAME}"
         )
         if total_expected_hours <= 6:
             times = [9, 9 + total_expected_hours]
@@ -112,4 +114,4 @@ def program(dev):
 
 
 if __name__ == "__main__":
-    cli()
+    app()

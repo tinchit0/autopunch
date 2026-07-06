@@ -1,12 +1,12 @@
 import os
 import re
+import subprocess
 import time
 from contextlib import contextmanager
 from datetime import date
+from enum import Enum
 
 import typer
-from google.cloud import scheduler_v1
-from google.protobuf import field_mask_pb2
 from selenium import webdriver
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
@@ -20,6 +20,11 @@ GCP_JOB_NAME = os.environ.get("AUTOPUNCH_GCP_JOB_NAME", "_NO_GCP_JOB_NAME_")
 GCP_LOCATION = os.environ.get("AUTOPUNCH_GCP_LOCATION", "_NO_GCP_LOCATION_")
 
 app = typer.Typer()
+
+
+class Infra(str, Enum):
+    at = "at"
+    gcp = "gcp"
 
 
 def sleep():
@@ -91,26 +96,49 @@ def punch(dev: bool = False):
         sleep()
 
 
+def schedule_with_at(times, today):
+    "Schedule one-shot 'autopunch punch' runs for today via the local 'at' daemon"
+    date_spec = today.strftime("%m/%d/%Y")
+    for hour in times:
+        subprocess.run(
+            ["at", f"{hour:02d}:00", date_spec],
+            input="autopunch punch\n",
+            text=True,
+            check=True,
+        )
+
+
+def schedule_with_gcp(times, today):
+    "Reprogram the GCP Cloud Scheduler job to punch at today's computed times"
+    from google.cloud import scheduler_v1
+    from google.protobuf import field_mask_pb2
+
+    client = scheduler_v1.CloudSchedulerClient()
+    job = client.get_job(
+        name=f"projects/{GCP_PROJECT_ID}/locations/{GCP_LOCATION}/jobs/{GCP_JOB_NAME}"
+    )
+    cron_hours = ",".join(str(x) for x in times)
+    job.schedule = f"0 {cron_hours} {today.day} {today.month} *"
+    update_mask = field_mask_pb2.FieldMask(paths=["schedule"])
+    client.update_job(job=job, update_mask=update_mask)
+
+
 @app.command()
-def program(dev: bool = False):
-    "Program executions of autopunch in GCP"
+def program(infra: Infra = Infra.at, dev: bool = False):
+    "Compute today's punch times and schedule them, locally via 'at' or in GCP"
     with enter_timenet(headless=not dev) as driver:
         today = date.today()
         total_expected_hours = extract_working_hours(driver, date=today)
         if total_expected_hours == 0:
             return
-        client = scheduler_v1.CloudSchedulerClient()
-        job = client.get_job(
-            name=f"projects/{GCP_PROJECT_ID}/locations/{GCP_LOCATION}/jobs/{GCP_JOB_NAME}"
-        )
         if total_expected_hours <= 6:
             times = [9, 9 + total_expected_hours]
         else:
             times = [9, 13, 14, 14 + total_expected_hours - 4]
-        cron_hours = ",".join(str(x) for x in times)
-        job.schedule = f"0 {cron_hours} {today.day} {today.month} *"
-        update_mask = field_mask_pb2.FieldMask(paths=["schedule"])
-        client.update_job(job=job, update_mask=update_mask)
+        if infra == Infra.at:
+            schedule_with_at(times, today)
+        else:
+            schedule_with_gcp(times, today)
 
 
 if __name__ == "__main__":

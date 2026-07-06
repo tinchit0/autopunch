@@ -3,7 +3,7 @@ import re
 import subprocess
 import time
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 
 import typer
@@ -98,8 +98,15 @@ def punch(dev: bool = False):
 
 def schedule_with_at(times, today):
     "Schedule one-shot 'autopunch punch' runs for today via the local 'at' daemon"
+    now = datetime.now()
     date_spec = today.strftime("%m/%d/%Y")
     for hour in times:
+        if datetime(today.year, today.month, today.day, hour) <= now:
+            typer.echo(
+                f"Aviso: las {hour:02d}:00 ya han pasado, no se programa ese punch",
+                err=True,
+            )
+            continue
         subprocess.run(
             ["at", f"{hour:02d}:00", date_spec],
             input="autopunch punch\n",

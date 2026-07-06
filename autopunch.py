@@ -1,9 +1,10 @@
 import os
+import random
 import re
 import subprocess
 import time
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import Enum
 
 import typer
@@ -96,19 +97,21 @@ def punch(dev: bool = False):
         sleep()
 
 
-def schedule_with_at(times, today):
+def schedule_with_at(times, today, noise=0):
     "Schedule one-shot 'autopunch punch' runs for today via the local 'at' daemon"
     now = datetime.now()
-    date_spec = today.strftime("%m/%d/%Y")
     for hour in times:
-        if datetime(today.year, today.month, today.day, hour) <= now:
+        target = datetime(today.year, today.month, today.day, hour)
+        if noise:
+            target += timedelta(minutes=random.gauss(0, noise))
+        if target <= now:
             typer.echo(
                 f"Aviso: las {hour:02d}:00 ya han pasado, no se programa ese punch",
                 err=True,
             )
             continue
         subprocess.run(
-            ["at", f"{hour:02d}:00", date_spec],
+            ["at", target.strftime("%H:%M"), target.strftime("%m/%d/%Y")],
             input="autopunch punch\n",
             text=True,
             check=True,
@@ -131,7 +134,7 @@ def schedule_with_gcp(times, today):
 
 
 @app.command()
-def program(infra: Infra = Infra.at, dev: bool = False):
+def program(infra: Infra = Infra.at, dev: bool = False, noise: int = 0):
     "Compute today's punch times and schedule them, locally via 'at' or in GCP"
     with enter_timenet(headless=not dev) as driver:
         today = date.today()
@@ -143,8 +146,12 @@ def program(infra: Infra = Infra.at, dev: bool = False):
         else:
             times = [9, 13, 14, 14 + total_expected_hours - 4]
         if infra == Infra.at:
-            schedule_with_at(times, today)
+            schedule_with_at(times, today, noise=noise)
         else:
+            if noise:
+                typer.echo(
+                    "Aviso: --noise no tiene efecto con --infra gcp", err=True
+                )
             schedule_with_gcp(times, today)
 
 

@@ -1,13 +1,17 @@
 import os
 import random
 import re
+import shlex
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from enum import Enum
+from typing import Optional
 
 import typer
+from loguru import logger
 from selenium import webdriver
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
@@ -28,6 +32,14 @@ class Infra(str, Enum):
     gcp = "gcp"
 
 
+def configure_logging(logfile: Optional[str]):
+    "Set up loguru sinks: always stderr, plus an optional logfile"
+    logger.remove()
+    logger.add(sys.stderr, level="INFO", diagnose=False)
+    if logfile:
+        logger.add(logfile, level="INFO", diagnose=False, rotation="10 MB", retention="30 days")
+
+
 def sleep():
     time.sleep(INTERSLEEP_TIME)
 
@@ -36,6 +48,7 @@ def sleep():
 def enter_timenet(headless=True):
     driver = None
     try:
+        logger.info("Arrancando Firefox (headless={})", headless)
         options = Options()
         if headless:
             options.add_argument("--headless")
@@ -47,6 +60,7 @@ def enter_timenet(headless=True):
             "https://timenet.gpisoftware.com/wcp/login/f94ff22a-8361-4033-80ef-215feda7babe"
         )
         sleep()
+        logger.info("Haciendo login en timenet como {}", TIMENET_USERNAME)
         user_input = driver.find_element(by=By.ID, value="user")
         user_input.send_keys(TIMENET_USERNAME)
         pass_input = driver.find_element(by=By.CSS_SELECTOR, value="#password input")
@@ -56,10 +70,12 @@ def enter_timenet(headless=True):
         )
         submit_button.click()
         sleep()
+        logger.info("Login en timenet completado")
         yield driver
     finally:
         if driver:
             driver.quit()
+            logger.debug("Firefox cerrado")
 
 
 def am_i_working(driver):
@@ -87,17 +103,29 @@ def extract_working_hours(driver, date=date.today()):
 
 
 @app.command()
-def punch(dev: bool = False):
+def punch(
+    dev: bool = False,
+    logfile: Optional[str] = typer.Option(
+        None, "--logfile", help="Fichero donde escribir los logs, además de stderr"
+    ),
+):
     "Enter timenet and punch in or out depending on the current state"
-    with enter_timenet(headless=not dev) as driver:
-        label = "Sortida" if am_i_working(driver) else "Entrada"
-        driver.find_element(
-            by=By.CSS_SELECTOR, value=f"button[aria-label={label}]"
-        ).click()
-        sleep()
+    configure_logging(logfile)
+    try:
+        with enter_timenet(headless=not dev) as driver:
+            label = "Sortida" if am_i_working(driver) else "Entrada"
+            logger.info("Estado detectado, se pulsará el botón '{}'", label)
+            driver.find_element(
+                by=By.CSS_SELECTOR, value=f"button[aria-label={label}]"
+            ).click()
+            sleep()
+        logger.success("Punch completado ({})", label)
+    except Exception:
+        logger.exception("Fallo al hacer punch")
+        raise
 
 
-def schedule_with_at(times, today, noise=0):
+def schedule_with_at(times, today, noise=0, logfile=None):
     "Schedule one-shot 'autopunch punch' runs for today via the local 'at' daemon"
     now = datetime.now()
     for hour in times:
@@ -105,14 +133,21 @@ def schedule_with_at(times, today, noise=0):
         if noise:
             target += timedelta(minutes=random.gauss(0, noise))
         if target <= now:
-            typer.echo(
-                f"Aviso: las {hour:02d}:00 ya han pasado, no se programa ese punch",
-                err=True,
+            logger.warning(
+                "Las {:02d}:00 ya han pasado, no se programa ese punch", hour
             )
             continue
+        punch_cmd = "autopunch punch"
+        if logfile:
+            punch_cmd += f" --logfile {shlex.quote(logfile)}"
+        logger.info(
+            "Programando '{}' a las {} vía 'at'",
+            punch_cmd,
+            target.strftime("%H:%M %m/%d/%Y"),
+        )
         subprocess.run(
             ["at", target.strftime("%H:%M"), target.strftime("%m/%d/%Y")],
-            input="autopunch punch\n",
+            input=f"{punch_cmd}\n",
             text=True,
             check=True,
         )
@@ -131,28 +166,44 @@ def schedule_with_gcp(times, today):
     job.schedule = f"0 {cron_hours} {today.day} {today.month} *"
     update_mask = field_mask_pb2.FieldMask(paths=["schedule"])
     client.update_job(job=job, update_mask=update_mask)
+    logger.info("Cloud Scheduler job actualizado con schedule '{}'", job.schedule)
 
 
 @app.command()
-def program(infra: Infra = Infra.at, dev: bool = False, noise: int = 0):
+def program(
+    infra: Infra = Infra.at,
+    dev: bool = False,
+    noise: int = 0,
+    logfile: Optional[str] = typer.Option(
+        None,
+        "--logfile",
+        help="Fichero donde escribir los logs; se propaga a los 'punch' programados vía 'at'",
+    ),
+):
     "Compute today's punch times and schedule them, locally via 'at' or in GCP"
-    with enter_timenet(headless=not dev) as driver:
-        today = date.today()
-        total_expected_hours = extract_working_hours(driver, date=today)
-        if total_expected_hours == 0:
-            return
-        if total_expected_hours <= 6:
-            times = [9, 9 + total_expected_hours]
-        else:
-            times = [9, 13, 14, 14 + total_expected_hours - 4]
-        if infra == Infra.at:
-            schedule_with_at(times, today, noise=noise)
-        else:
-            if noise:
-                typer.echo(
-                    "Aviso: --noise no tiene efecto con --infra gcp", err=True
-                )
-            schedule_with_gcp(times, today)
+    configure_logging(logfile)
+    try:
+        with enter_timenet(headless=not dev) as driver:
+            today = date.today()
+            total_expected_hours = extract_working_hours(driver, date=today)
+            logger.info("Horas esperadas hoy: {}", total_expected_hours)
+            if total_expected_hours == 0:
+                logger.info("0 horas esperadas, no se programa ningún punch")
+                return
+            if total_expected_hours <= 6:
+                times = [9, 9 + total_expected_hours]
+            else:
+                times = [9, 13, 14, 14 + total_expected_hours - 4]
+            logger.info("Horas de punch calculadas: {}", times)
+            if infra == Infra.at:
+                schedule_with_at(times, today, noise=noise, logfile=logfile)
+            else:
+                if noise:
+                    logger.warning("--noise no tiene efecto con --infra gcp")
+                schedule_with_gcp(times, today)
+    except Exception:
+        logger.exception("Fallo en program")
+        raise
 
 
 if __name__ == "__main__":
